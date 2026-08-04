@@ -10,6 +10,7 @@ import logging
 import botocore.exceptions
 from swift_config.swift_config import get_swift_connection
 from utils.settings import container_name
+from utils.lifespan_handler import initialize_swift
 
 #config logger
 logging.basicConfig(level=logging.INFO,handlers=[logging.StreamHandler()])
@@ -92,6 +93,34 @@ async def upload_manifest_backend(
 
         async with swift_session.put(upload_url, headers=headers, data=updated_manifest, ssl=False) as resp:
             # OpenStack Swift usually returns 201 for object PUT; accept a few success codes
+            if resp.status == 401:
+                logger.warning("Swift token expired. Re-authenticating...")
+
+                # Re-authenticate and retry
+                new_token,new_storage_url = await initialize_swift()
+
+                # Update app.state
+                request.app.state.swift_token = new_token
+                request.app.state.swift_storage_url = new_storage_url
+
+                # Update headers
+                headers["X-Auth-Token"] = new_token
+                async with swift_session.put(
+                    upload_url,
+                    headers=headers,
+                    data=updated_manifest,
+                    ssl=False,
+                ) as retry_resp:
+                    if retry_resp.status not in (200, 201, 202, 204):
+                        text = await retry_resp.text()
+                        logger.info(f"File upload retry failed [{retry_resp.status}]: {text}")
+                        raise HTTPException(status_code=retry_resp.status, detail="File upload failed")
+                    logger.info(
+                        f"Uploaded manifest to {upload_url} (status {retry_resp.status})"
+                    )
+
+                    return {"message":"Upload successfully!"}
+
             if resp.status not in (200, 201, 202, 204):
                 text = await resp.text()
                 logger.info(f"File upload failed [{resp.status}]: {text}")

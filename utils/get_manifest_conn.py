@@ -6,6 +6,7 @@ import json
 from dotenv import load_dotenv
 from fastapi.responses import JSONResponse
 from swift_config.swift_config import get_swift_connection  # (left as-is, even if unused)
+from utils.lifespan_handler import initialize_swift
 
 # Load .env file
 load_dotenv()
@@ -48,15 +49,50 @@ async def get_manifest_conn(manifest_id:str,request: Request):
         # retrieve from the container
         file_url = f"{swift_storage_url.rstrip('/')}/{container_name}/{manifest_name}"
         headers = {
-            "X-Auth-Token": swift_token
+            "X-Auth-Token": swift_token,
         }
         
         async with swift_session.get(file_url, headers=headers, ssl=False) as resp:
-            #Handle token expiration
+            # Handle token expiration
             if resp.status == 401:
-                logger.error("Swift token has expired or it invalid.")
-                raise HTTPException(status_code=401, detail="Swift token has expired. Please re-authenticate.")
-            
+                logger.error("Swift token has expired or it is invalid.Re-authenticating...")
+
+                # Re-authenticate and retry
+                new_token, new_storage_url = await initialize_swift()
+                logger.info(
+                "Swift re-authentication completed. Token exists: %s",
+                bool(new_token)
+                )
+                # update app.state
+                request.app.state.swift_token = new_token
+                request.app.state.swift_storage_url = new_storage_url
+
+                # update headers and retry the request
+                headers["X-Auth-Token"] = new_token
+                logger.info("About to retry Swift GET: %s", file_url)
+                
+                async with swift_session.get(file_url, headers=headers, ssl=False) as retry_resp:
+                    logger.info(
+                        "Retry Swift GET status: %s",
+                        retry_resp.status
+                    )
+                    if retry_resp.status == 404:
+                        raise HTTPException(status_code=404, detail=f"Manifest not found for manifest Id: {manifest_id}.")
+                    
+                    if retry_resp.status != 200:
+                        logger.error(f"Swift GET unexpected status {retry_resp.status} for {file_url}")
+                        raise HTTPException(status_code=502, detail="Upstream storage error.")
+                    
+                    # 200 OK: parse and return
+                    manifest_bytes = await retry_resp.read()
+                    try:
+                        manifest_data = json.loads(manifest_bytes)
+                    except Exception:
+                        logger.error("Manifest is not valid JSON")
+                        raise HTTPException(status_code=502, detail="Manifest is not valid JSON.")
+                    
+                    return JSONResponse(content=manifest_data, status_code=200)
+
             if resp.status == 404:
                 raise HTTPException(status_code=404, detail=f"Manifest not found for manifest Id: {manifest_id}.")
             

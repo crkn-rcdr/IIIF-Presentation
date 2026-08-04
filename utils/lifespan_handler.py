@@ -36,7 +36,7 @@ async def lifespan(app) -> AsyncGenerator[None, None]:
         
         # Swift authentication
         swift_token, swift_storage_url = await initialize_swift()
-        
+      
         # Store swift_session, swift_token, and swift_storage_url in app state for later use
         app.state.swift_session = swift_session
         app.state.swift_token = swift_token
@@ -92,6 +92,7 @@ async def initialize_swift():
             if resp.status in (200, 204):
                 swift_token = resp.headers.get("X-Auth-Token")
                 swift_storage_url = resp.headers.get("X-Storage-Url")
+              
                 if not swift_token or not swift_storage_url:
                     raise Exception("Authentication failed: missing token or storage URL.")
                 return swift_token, swift_storage_url
